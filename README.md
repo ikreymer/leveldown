@@ -74,7 +74,7 @@ We aim to support _at least_ Active LTS and Current Node.js releases, Electron 5
 The `leveldown` npm package ships with prebuilt binaries for popular 64-bit platforms as well as ARM, M1, Android and Alpine (musl) and is known to work on:
 
 - **Linux** (including ARM platforms such as Raspberry Pi and Kindle)
-- **Mac OS** (10.10 and later)
+- **Mac OS** (10.7 and later)
 - **Solaris** (SmartOS & Nodejitsu)
 - **FreeBSD**
 - **Windows**

@@ -75,7 +75,7 @@
           ],
 
           # Set minimum target version because we're building on newer
-          "MACOSX_DEPLOYMENT_TARGET": "10.10",
+          "MACOSX_DEPLOYMENT_TARGET": "10.7",
 
           # Build universal binary to support M1 (Apple silicon)
           "OTHER_CFLAGS": [

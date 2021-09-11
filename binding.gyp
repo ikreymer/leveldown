@@ -26,7 +26,8 @@
           "GCC_SYMBOLS_PRIVATE_EXTERN": "YES",
 
           # Set minimum target version because we're building on newer
-          "MACOSX_DEPLOYMENT_TARGET": "10.10",
+          # Same as https://github.com/nodejs/node/blob/v10.0.0/common.gypi#L416
+          "MACOSX_DEPLOYMENT_TARGET": "10.7",
 
           # Build universal binary to support M1 (Apple silicon)
           "OTHER_CFLAGS": [
