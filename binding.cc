@@ -496,14 +496,14 @@ struct BaseIterator {
                std::string* gte,
                bool fillCache)
     : database_(database),
+      isEnding_(false),
+      hasEnded_(false),
       dbIterator_(NULL),
       reverse_(reverse),
       lt_(lt),
       lte_(lte),
       gt_(gt),
-      gte_(gte),
-      isEnding_(false),
-      hasEnded_(false) {
+      gte_(gte) {
     options_ = new leveldb::ReadOptions();
     options_->fill_cache = fillCache;
     options_->snapshot = database->NewSnapshot();
@@ -522,9 +522,10 @@ struct BaseIterator {
 
   /**
    * Set iterator and seek to the first key based on range options.
+   * Returns false if already initialized.
    */
-  void InitializeIterator() {
-    assert(dbIterator_ == NULL);
+  bool Initialize () {
+    if (dbIterator_ != NULL) return false;
     dbIterator_ = database_->NewIterator(options_);
 
     if (!reverse_ && gte_ != NULL) {
@@ -555,6 +556,45 @@ struct BaseIterator {
       dbIterator_->SeekToLast();
     } else {
       dbIterator_->SeekToFirst();
+    }
+
+    return true;
+  }
+
+  void Seek (leveldb::Slice& target) {
+    dbIterator_->Seek(target);
+
+    if (OutOfRange(target)) {
+      if (reverse_) {
+        dbIterator_->SeekToFirst();
+        dbIterator_->Prev();
+      } else {
+        dbIterator_->SeekToLast();
+        dbIterator_->Next();
+      }
+    } else if (dbIterator_->Valid()) {
+      int cmp = dbIterator_->key().compare(target);
+      if (cmp > 0 && reverse_) {
+        dbIterator_->Prev();
+      } else if (cmp < 0 && !reverse_) {
+        dbIterator_->Next();
+      }
+    } else {
+      if (reverse_) {
+        dbIterator_->SeekToLast();
+      } else {
+        dbIterator_->SeekToFirst();
+      }
+      if (dbIterator_->Valid()) {
+        int cmp = dbIterator_->key().compare(target);
+        if (cmp > 0 && reverse_) {
+          dbIterator_->SeekToFirst();
+          dbIterator_->Prev();
+        } else if (cmp < 0 && !reverse_) {
+          dbIterator_->SeekToLast();
+          dbIterator_->Next();
+        }
+      }
     }
   }
 
@@ -597,16 +637,16 @@ struct BaseIterator {
   }
 
   Database* database_;
+  bool isEnding_;
+  bool hasEnded_;
+
+private:
   leveldb::Iterator* dbIterator_;
   bool reverse_;
   std::string* lt_;
   std::string* lte_;
   std::string* gt_;
   std::string* gte_;
-  bool isEnding_;
-  bool hasEnded_;
-
-private:
   leveldb::ReadOptions* options_;
 };
 
@@ -665,14 +705,8 @@ struct Iterator final : public BaseIterator {
     }
   }
 
-  bool GetIterator () {
-    if (dbIterator_ != NULL) return false;
-    InitializeIterator();
-    return true;
-  }
-
   bool Read (std::string& key, std::string& value) {
-    if (!GetIterator() && !seeking_) {
+    if (!Initialize() && !seeking_) {
       Advance();
     }
 
@@ -1104,7 +1138,7 @@ struct ClearWorker final : public PriorityWorker {
   }
 
   void DoExecute () override {
-    baseIterator_->InitializeIterator();
+    baseIterator_->Initialize();
 
     while (baseIterator_->Valid()) {
       leveldb::Slice keySlice = baseIterator_->CurrentKey();
@@ -1416,46 +1450,10 @@ NAPI_METHOD(iterator_seek) {
   }
 
   leveldb::Slice target = ToSlice(env, argv[1]);
-  iterator->GetIterator();
-
-  leveldb::Iterator* dbIterator = iterator->dbIterator_;
-  dbIterator->Seek(target);
-
+  iterator->Initialize();
   iterator->seeking_ = true;
   iterator->landed_ = false;
-
-  if (iterator->OutOfRange(target)) {
-    if (iterator->reverse_) {
-      dbIterator->SeekToFirst();
-      dbIterator->Prev();
-    } else {
-      dbIterator->SeekToLast();
-      dbIterator->Next();
-    }
-  } else if (dbIterator->Valid()) {
-    int cmp = dbIterator->key().compare(target);
-    if (cmp > 0 && iterator->reverse_) {
-      dbIterator->Prev();
-    } else if (cmp < 0 && !iterator->reverse_) {
-      dbIterator->Next();
-    }
-  } else {
-    if (iterator->reverse_) {
-      dbIterator->SeekToLast();
-    } else {
-      dbIterator->SeekToFirst();
-    }
-    if (dbIterator->Valid()) {
-      int cmp = dbIterator->key().compare(target);
-      if (cmp > 0 && iterator->reverse_) {
-        dbIterator->SeekToFirst();
-        dbIterator->Prev();
-      } else if (cmp < 0 && !iterator->reverse_) {
-        dbIterator->SeekToLast();
-        dbIterator->Next();
-      }
-    }
-  }
+  iterator->Seek(target);
 
   DisposeSliceBuffer(target);
   NAPI_RETURN_UNDEFINED();
