@@ -547,6 +547,10 @@ struct BaseIterator {
     else dbIterator_->Next();
   }
 
+  leveldb::Status IteratorStatus () {
+    return dbIterator_->status();
+  }
+
   bool OutOfRange (leveldb::Slice& target) {
     return ((lt_  != NULL && target.compare(*lt_) >= 0) ||
             (lte_ != NULL && target.compare(*lte_) > 0) ||
@@ -614,10 +618,6 @@ struct Iterator final : public BaseIterator {
   napi_ref Detach () {
     database_->DetachIterator(id_);
     return ref_;
-  }
-
-  leveldb::Status IteratorStatus () {
-    return dbIterator_->status();
   }
 
   void IteratorEnd () {
@@ -1115,7 +1115,7 @@ struct ClearWorker final : public PriorityWorker {
       baseIterator_->Advance();
     }
 
-    SetStatus(dbIterator_->status());
+    SetStatus(baseIterator_->IteratorStatus());
   }
 
   void DoFinally () override {
