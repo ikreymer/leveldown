@@ -488,31 +488,40 @@ struct PriorityWorker : public BaseWorker {
  * Owns a leveldb iterator.
  */
 struct BaseIterator {
-  BaseIterator(bool reverse,
+  BaseIterator(Database* database,
+               bool reverse,
                std::string* lt,
                std::string* lte,
                std::string* gt,
-               std::string* gte)
-    : dbIterator_(NULL),
+               std::string* gte,
+               bool fillCache)
+    : database_(database),
+      dbIterator_(NULL),
       reverse_(reverse),
       lt_(lt),
       lte_(lte),
       gt_(gt),
-      gte_(gte) {}
+      gte_(gte) {
+    options_ = new leveldb::ReadOptions();
+    options_->fill_cache = fillCache;
+    options_->snapshot = database->NewSnapshot();
+  }
 
   ~BaseIterator () {
     if (lt_ != NULL) delete lt_;
     if (gt_ != NULL) delete gt_;
     if (lte_ != NULL) delete lte_;
     if (gte_ != NULL) delete gte_;
+
+    delete options_;
   }
 
   /**
    * Set iterator and seek to the first key based on range options.
    */
-  void InitializeIterator(leveldb::Iterator* dbIterator) {
+  void InitializeIterator() {
     assert(dbIterator_ == NULL);
-    dbIterator_ = dbIterator;
+    dbIterator_ = database_->NewIterator(options_);
 
     if (!reverse_ && gte_ != NULL) {
       dbIterator_->Seek(*gte_);
@@ -545,6 +554,12 @@ struct BaseIterator {
     }
   }
 
+  void IteratorEnd () {
+    delete dbIterator_;
+    dbIterator_ = NULL;
+    database_->ReleaseSnapshot(options_->snapshot);
+  }
+
   void Advance () {
     if (reverse_) dbIterator_->Prev();
     else dbIterator_->Next();
@@ -573,12 +588,14 @@ struct BaseIterator {
             (gte_ != NULL && target.compare(*gte_) < 0));
   }
 
+  Database* database_;
   leveldb::Iterator* dbIterator_;
   bool reverse_;
   std::string* lt_;
   std::string* lte_;
   std::string* gt_;
   std::string* gte_;
+  leveldb::ReadOptions* options_;
 };
 
 /**
@@ -599,8 +616,7 @@ struct Iterator final : public BaseIterator {
             bool keyAsBuffer,
             bool valueAsBuffer,
             uint32_t highWaterMark)
-    : BaseIterator(reverse, lt, lte, gt, gte),
-      database_(database),
+    : BaseIterator(database, reverse, lt, lte, gt, gte, fillCache),
       id_(id),
       keys_(keys),
       values_(values),
@@ -615,14 +631,10 @@ struct Iterator final : public BaseIterator {
       ended_(false),
       endWorker_(NULL),
       ref_(NULL) {
-    options_ = new leveldb::ReadOptions();
-    options_->fill_cache = fillCache;
-    options_->snapshot = database->NewSnapshot();
   }
 
   ~Iterator () {
     assert(ended_);
-    delete options_;
   }
 
   void Attach (napi_ref ref) {
@@ -633,12 +645,6 @@ struct Iterator final : public BaseIterator {
   napi_ref Detach () {
     database_->DetachIterator(id_);
     return ref_;
-  }
-
-  void IteratorEnd () {
-    delete dbIterator_;
-    dbIterator_ = NULL;
-    database_->ReleaseSnapshot(options_->snapshot);
   }
 
   void CheckEndCallback () {
@@ -652,7 +658,7 @@ struct Iterator final : public BaseIterator {
 
   bool GetIterator () {
     if (dbIterator_ != NULL) return false;
-    InitializeIterator(database_->NewIterator(options_));
+    InitializeIterator();
     return true;
   }
 
@@ -709,7 +715,6 @@ struct Iterator final : public BaseIterator {
     }
   }
 
-  Database* database_;
   uint32_t id_;
   bool keys_;
   bool values_;
@@ -723,7 +728,6 @@ struct Iterator final : public BaseIterator {
   bool nexting_;
   bool ended_;
 
-  leveldb::ReadOptions* options_;
   BaseWorker* endWorker_;
 
 private:
@@ -1085,12 +1089,8 @@ struct ClearWorker final : public PriorityWorker {
     : PriorityWorker(env, database, callback, "leveldown.db.clear"),
       limit_(limit),
       count_(0),
-      ended_(false),
-      dbIterator_(NULL) {
-    baseIterator_ = new BaseIterator(reverse, lt, lte, gt, gte);
-    readOptions_ = new leveldb::ReadOptions();
-    readOptions_->fill_cache = false;
-    readOptions_->snapshot = database->NewSnapshot();
+      ended_(false) {
+    baseIterator_ = new BaseIterator(database, reverse, lt, lte, gt, gte, false);
     writeOptions_ = new leveldb::WriteOptions();
     writeOptions_->sync = false;
   }
@@ -1100,13 +1100,11 @@ struct ClearWorker final : public PriorityWorker {
     assert(ended_);
 
     delete baseIterator_;
-    delete readOptions_;
     delete writeOptions_;
   }
 
   void DoExecute () override {
-    dbIterator_ = database_->NewIterator(readOptions_);
-    baseIterator_->InitializeIterator(dbIterator_);
+    baseIterator_->InitializeIterator();
 
     while (baseIterator_->Valid()) {
       leveldb::Slice keySlice = baseIterator_->CurrentKey();
@@ -1130,9 +1128,7 @@ struct ClearWorker final : public PriorityWorker {
   }
 
   void DoFinally () override {
-    delete dbIterator_;
-    dbIterator_ = NULL;
-    database_->ReleaseSnapshot(readOptions_->snapshot);
+    baseIterator_->IteratorEnd();
     ended_ = true;
     PriorityWorker::DoFinally();
   }
@@ -1141,8 +1137,6 @@ struct ClearWorker final : public PriorityWorker {
   int count_;
   bool ended_;
   BaseIterator* baseIterator_;
-  leveldb::Iterator* dbIterator_;
-  leveldb::ReadOptions* readOptions_;
   leveldb::WriteOptions* writeOptions_;
 };
 
