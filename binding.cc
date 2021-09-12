@@ -488,40 +488,49 @@ struct PriorityWorker : public BaseWorker {
  * Owns a leveldb iterator.
  */
 struct BaseIterator {
-  BaseIterator()
-    : dbIterator_(NULL) {}
+  BaseIterator(std::string* lt,
+               std::string* lte,
+               std::string* gt,
+               std::string* gte)
+    : dbIterator_(NULL),
+      lt_(lt),
+      lte_(lte),
+      gt_(gt),
+      gte_(gte) {}
+
+  ~BaseIterator () {
+    if (lt_ != NULL) delete lt_;
+    if (gt_ != NULL) delete gt_;
+    if (lte_ != NULL) delete lte_;
+    if (gte_ != NULL) delete gte_;
+  }
 
   /**
    * Seek to the first key based on range options.
    */
-  void InitialSeek(
-    bool reverse,
-    std::string* lt,
-    std::string* lte,
-    std::string* gt,
-    std::string* gte) {
-    if (!reverse && gte != NULL) {
-      dbIterator_->Seek(*gte);
-    } else if (!reverse && gt != NULL) {
-      dbIterator_->Seek(*gt);
+  void InitialSeek(bool reverse) {
+    if (!reverse && gte_ != NULL) {
+      dbIterator_->Seek(*gte_);
+    } else if (!reverse && gt_ != NULL) {
+      dbIterator_->Seek(*gt_);
 
-      if (dbIterator_->Valid() && dbIterator_->key().compare(*gt) == 0) {
+      if (dbIterator_->Valid() && dbIterator_->key().compare(*gt_) == 0) {
         dbIterator_->Next();
       }
-    } else if (reverse && lte != NULL) {
-      dbIterator_->Seek(*lte);
+    } else if (reverse && lte_ != NULL) {
+      dbIterator_->Seek(*lte_);
 
       if (!dbIterator_->Valid()) {
         dbIterator_->SeekToLast();
-      } else if (dbIterator_->key().compare(*lte) > 0) {
+      } else if (dbIterator_->key().compare(*lte_) > 0) {
         dbIterator_->Prev();
       }
-    } else if (reverse && lt != NULL) {
-      dbIterator_->Seek(*lt);
+    } else if (reverse && lt_ != NULL) {
+      dbIterator_->Seek(*lt_);
 
       if (!dbIterator_->Valid()) {
         dbIterator_->SeekToLast();
-      } else if (dbIterator_->key().compare(*lt) >= 0) {
+      } else if (dbIterator_->key().compare(*lt_) >= 0) {
         dbIterator_->Prev();
       }
     } else if (reverse) {
@@ -531,7 +540,18 @@ struct BaseIterator {
     }
   }
 
+  bool OutOfRange (leveldb::Slice& target) {
+    return ((lt_  != NULL && target.compare(*lt_) >= 0) ||
+            (lte_ != NULL && target.compare(*lte_) > 0) ||
+            (gt_  != NULL && target.compare(*gt_) <= 0) ||
+            (gte_ != NULL && target.compare(*gte_) < 0));
+  }
+
   leveldb::Iterator* dbIterator_;
+  std::string* lt_;
+  std::string* lte_;
+  std::string* gt_;
+  std::string* gte_;
 };
 
 /**
@@ -552,17 +572,13 @@ struct Iterator final : public BaseIterator {
             bool keyAsBuffer,
             bool valueAsBuffer,
             uint32_t highWaterMark)
-    : BaseIterator(),
+    : BaseIterator(lt, lte, gt, gte),
       database_(database),
       id_(id),
       reverse_(reverse),
       keys_(keys),
       values_(values),
       limit_(limit),
-      lt_(lt),
-      lte_(lte),
-      gt_(gt),
-      gte_(gte),
       keyAsBuffer_(keyAsBuffer),
       valueAsBuffer_(valueAsBuffer),
       highWaterMark_(highWaterMark),
@@ -580,12 +596,6 @@ struct Iterator final : public BaseIterator {
 
   ~Iterator () {
     assert(ended_);
-
-    if (lt_ != NULL) delete lt_;
-    if (gt_ != NULL) delete gt_;
-    if (lte_ != NULL) delete lte_;
-    if (gte_ != NULL) delete gte_;
-
     delete options_;
   }
 
@@ -622,7 +632,7 @@ struct Iterator final : public BaseIterator {
     if (dbIterator_ != NULL) return false;
 
     dbIterator_ = database_->NewIterator(options_);
-    InitialSeek(reverse_, lt_, lte_, gt_, gte_);
+    InitialSeek(reverse_);
 
     return true;
   }
@@ -654,13 +664,6 @@ struct Iterator final : public BaseIterator {
     }
 
     return false;
-  }
-
-  bool OutOfRange (leveldb::Slice& target) {
-    return ((lt_  != NULL && target.compare(*lt_) >= 0) ||
-            (lte_ != NULL && target.compare(*lte_) > 0) ||
-            (gt_  != NULL && target.compare(*gt_) <= 0) ||
-            (gte_ != NULL && target.compare(*gte_) < 0));
   }
 
   bool IteratorNext (std::vector<std::pair<std::string, std::string> >& result) {
@@ -697,10 +700,6 @@ struct Iterator final : public BaseIterator {
   bool keys_;
   bool values_;
   int limit_;
-  std::string* lt_;
-  std::string* lte_;
-  std::string* gt_;
-  std::string* gte_;
   bool keyAsBuffer_;
   bool valueAsBuffer_;
   uint32_t highWaterMark_;
@@ -1073,13 +1072,9 @@ struct ClearWorker final : public PriorityWorker {
       reverse_(reverse),
       limit_(limit),
       count_(0),
-      lt_(lt),
-      lte_(lte),
-      gt_(gt),
-      gte_(gte),
       ended_(false),
       dbIterator_(NULL) {
-    baseIterator_ = new BaseIterator();
+    baseIterator_ = new BaseIterator(lt, lte, gt, gte);
     readOptions_ = new leveldb::ReadOptions();
     readOptions_->fill_cache = false;
     readOptions_->snapshot = database->NewSnapshot();
@@ -1091,11 +1086,6 @@ struct ClearWorker final : public PriorityWorker {
     // TODO: write GC tests
     assert(ended_);
 
-    if (lt_ != NULL) delete lt_;
-    if (gt_ != NULL) delete gt_;
-    if (lte_ != NULL) delete lte_;
-    if (gte_ != NULL) delete gte_;
-
     delete baseIterator_;
     delete readOptions_;
     delete writeOptions_;
@@ -1105,12 +1095,12 @@ struct ClearWorker final : public PriorityWorker {
     dbIterator_ = database_->NewIterator(readOptions_);
 
     baseIterator_->dbIterator_ = dbIterator_;
-    baseIterator_->InitialSeek(reverse_, lt_, lte_, gt_, gte_);
+    baseIterator_->InitialSeek(reverse_);
 
     while (dbIterator_->Valid()) {
       leveldb::Slice keySlice = dbIterator_->key();
 
-      if ((limit_ >= 0 && ++count_ > limit_) || OutOfRange(keySlice)) {
+      if ((limit_ >= 0 && ++count_ > limit_) || baseIterator_->OutOfRange(keySlice)) {
         break;
       }
 
@@ -1137,21 +1127,9 @@ struct ClearWorker final : public PriorityWorker {
     PriorityWorker::DoFinally();
   }
 
-  // TODO: move to shared method
-  bool OutOfRange (leveldb::Slice& target) {
-    return ((lt_  != NULL && target.compare(*lt_) >= 0) ||
-            (lte_ != NULL && target.compare(*lte_) > 0) ||
-            (gt_  != NULL && target.compare(*gt_) <= 0) ||
-            (gte_ != NULL && target.compare(*gte_) < 0));
-  }
-
   bool reverse_;
   int limit_;
   int count_;
-  std::string* lt_;
-  std::string* lte_;
-  std::string* gt_;
-  std::string* gte_;
   bool ended_;
   BaseIterator* baseIterator_;
   leveldb::Iterator* dbIterator_;
