@@ -522,10 +522,10 @@ struct BaseIterator {
 
   /**
    * Set iterator and seek to the first key based on range options.
-   * Returns false if already initialized.
+   * Returns if already initialized.
    */
-  bool Initialize () {
-    if (dbIterator_ != NULL) return false;
+  void Initialize () {
+    if (dbIterator_ != NULL) return;
     dbIterator_ = database_->NewIterator(options_);
 
     if (!reverse_ && gte_ != NULL) {
@@ -557,10 +557,11 @@ struct BaseIterator {
     } else {
       dbIterator_->SeekToFirst();
     }
-
-    return true;
   }
 
+  /**
+   * Seek manually (during iteration).
+   */
   void Seek (leveldb::Slice& target) {
     dbIterator_->Seek(target);
 
@@ -625,7 +626,7 @@ struct BaseIterator {
     return dbIterator_->value();
   }
 
-  leveldb::Status IteratorStatus () {
+  leveldb::Status Status () {
     return dbIterator_->status();
   }
 
@@ -677,7 +678,6 @@ struct Iterator final : public BaseIterator {
       valueAsBuffer_(valueAsBuffer),
       highWaterMark_(highWaterMark),
       count_(0),
-      seeking_(false),
       landed_(false),
       nexting_(false),
       endWorker_(NULL),
@@ -705,57 +705,44 @@ struct Iterator final : public BaseIterator {
     }
   }
 
-  bool Read (std::string& key, std::string& value) {
-    if (!Initialize() && !seeking_) {
-      Advance();
-    }
-
-    seeking_ = false;
-
-    if (Valid()) {
-      leveldb::Slice keySlice = CurrentKey();
-
-      if ((limit_ < 0 || ++count_ <= limit_) && !OutOfRange(keySlice)) {
-        if (keys_) {
-          key.assign(keySlice.data(), keySlice.size());
-        }
-        if (values_) {
-          leveldb::Slice valueSlice = CurrentValue();
-          value.assign(valueSlice.data(), valueSlice.size());
-        }
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  bool IteratorNext (std::vector<std::pair<std::string, std::string> >& result) {
+  bool Next (std::vector<std::pair<std::string, std::string>>& result) {
     size_t size = 0;
     uint32_t cacheSize = 0;
 
-    while (true) {
+    while (Valid()) {
+      leveldb::Slice keySlice = CurrentKey();
       std::string key, value;
-      bool ok = Read(key, value);
 
-      if (ok) {
-        result.push_back(std::make_pair(key, value));
-
-        if (!landed_) {
-          landed_ = true;
-          return true;
-        }
-
-        size = size + key.size() + value.size();
-        if (size > highWaterMark_) return true;
-
-        // Limit the size of the cache to prevent starving the event loop
-        // in JS-land while we're recursively calling process.nextTick().
-        if (++cacheSize >= 1000) return true;
-      } else {
-        return false;
+      if ((limit_ >= 0 && ++count_ > limit_) || OutOfRange(keySlice)) {
+        break;
       }
+
+      if (keys_) {
+        key.assign(keySlice.data(), keySlice.size());
+      }
+
+      if (values_) {
+        leveldb::Slice valueSlice = CurrentValue();
+        value.assign(valueSlice.data(), valueSlice.size());
+      }
+
+      Advance();
+      result.push_back(std::make_pair(key, value));
+
+      if (!landed_) {
+        landed_ = true;
+        return true;
+      }
+
+      size = size + key.size() + value.size();
+      if (size > highWaterMark_) return true;
+
+      // Limit the size of the cache to prevent starving the event loop
+      // in JS-land while we're recursively calling process.nextTick().
+      if (++cacheSize >= 1000) return true;
     }
+
+    return false;
   }
 
   uint32_t id_;
@@ -766,7 +753,6 @@ struct Iterator final : public BaseIterator {
   bool valueAsBuffer_;
   uint32_t highWaterMark_;
   int count_;
-  bool seeking_;
   bool landed_;
   bool nexting_;
 
@@ -1158,7 +1144,7 @@ struct ClearWorker final : public PriorityWorker {
       baseIterator_->Advance();
     }
 
-    SetStatus(baseIterator_->IteratorStatus());
+    SetStatus(baseIterator_->Status());
   }
 
   void DoFinally () override {
@@ -1451,7 +1437,6 @@ NAPI_METHOD(iterator_seek) {
 
   leveldb::Slice target = ToSlice(env, argv[1]);
   iterator->Initialize();
-  iterator->seeking_ = true;
   iterator->landed_ = false;
   iterator->Seek(target);
 
@@ -1526,9 +1511,11 @@ struct NextWorker final : public BaseWorker {
   ~NextWorker () {}
 
   void DoExecute () override {
-    ok_ = iterator_->IteratorNext(result_);
+    iterator_->Initialize();
+    ok_ = iterator_->Next(result_);
+
     if (!ok_) {
-      SetStatus(iterator_->IteratorStatus());
+      SetStatus(iterator_->Status());
     }
   }
 
