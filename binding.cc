@@ -508,9 +508,12 @@ struct BaseIterator {
   }
 
   /**
-   * Seek to the first key based on range options.
+   * Set iterator and seek to the first key based on range options.
    */
-  void InitialSeek() {
+  void InitializeIterator(leveldb::Iterator* dbIterator) {
+    assert(dbIterator_ == NULL);
+    dbIterator_ = dbIterator;
+
     if (!reverse_ && gte_ != NULL) {
       dbIterator_->Seek(*gte_);
     } else if (!reverse_ && gt_ != NULL) {
@@ -637,10 +640,7 @@ struct Iterator final : public BaseIterator {
 
   bool GetIterator () {
     if (dbIterator_ != NULL) return false;
-
-    dbIterator_ = database_->NewIterator(options_);
-    InitialSeek();
-
+    InitializeIterator(database_->NewIterator(options_));
     return true;
   }
 
@@ -1093,9 +1093,7 @@ struct ClearWorker final : public PriorityWorker {
 
   void DoExecute () override {
     dbIterator_ = database_->NewIterator(readOptions_);
-
-    baseIterator_->dbIterator_ = dbIterator_;
-    baseIterator_->InitialSeek();
+    baseIterator_->InitializeIterator(dbIterator_);
 
     while (dbIterator_->Valid()) {
       leveldb::Slice keySlice = dbIterator_->key();
