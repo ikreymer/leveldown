@@ -550,6 +550,18 @@ struct BaseIterator {
     else dbIterator_->Next();
   }
 
+  bool Valid () {
+    return dbIterator_->Valid();
+  }
+
+  leveldb::Slice CurrentKey () {
+    return dbIterator_->key();
+  }
+
+  leveldb::Slice CurrentValue () {
+    return dbIterator_->value();
+  }
+
   leveldb::Status IteratorStatus () {
     return dbIterator_->status();
   }
@@ -651,15 +663,16 @@ struct Iterator final : public BaseIterator {
 
     seeking_ = false;
 
-    if (dbIterator_->Valid()) {
-      leveldb::Slice keySlice = dbIterator_->key();
+    if (Valid()) {
+      leveldb::Slice keySlice = CurrentKey();
 
       if ((limit_ < 0 || ++count_ <= limit_) && !OutOfRange(keySlice)) {
         if (keys_) {
           key.assign(keySlice.data(), keySlice.size());
         }
         if (values_) {
-          value.assign(dbIterator_->value().data(), dbIterator_->value().size());
+          leveldb::Slice valueSlice = CurrentValue();
+          value.assign(valueSlice.data(), valueSlice.size());
         }
         return true;
       }
@@ -1095,8 +1108,8 @@ struct ClearWorker final : public PriorityWorker {
     dbIterator_ = database_->NewIterator(readOptions_);
     baseIterator_->InitializeIterator(dbIterator_);
 
-    while (dbIterator_->Valid()) {
-      leveldb::Slice keySlice = dbIterator_->key();
+    while (baseIterator_->Valid()) {
+      leveldb::Slice keySlice = baseIterator_->CurrentKey();
 
       if ((limit_ >= 0 && ++count_ > limit_) || baseIterator_->OutOfRange(keySlice)) {
         break;
