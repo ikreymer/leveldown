@@ -485,51 +485,59 @@ struct PriorityWorker : public BaseWorker {
 };
 
 /**
- * Common logic for seeking to the first key based on range options.
- * TODO: move to struct (something like "BaseIterator")
+ * Owns a leveldb iterator.
  */
-static void initial_seek(
-  leveldb::Iterator* dbIterator,
-  bool reverse,
-  std::string* lt,
-  std::string* lte,
-  std::string* gt,
-  std::string* gte) {
-  if (!reverse && gte != NULL) {
-    dbIterator->Seek(*gte);
-  } else if (!reverse && gt != NULL) {
-    dbIterator->Seek(*gt);
+struct BaseIterator {
+  BaseIterator()
+    : dbIterator_(NULL) {}
 
-    if (dbIterator->Valid() && dbIterator->key().compare(*gt) == 0) {
-      dbIterator->Next();
-    }
-  } else if (reverse && lte != NULL) {
-    dbIterator->Seek(*lte);
+  /**
+   * Seek to the first key based on range options.
+   */
+  void InitialSeek(
+    bool reverse,
+    std::string* lt,
+    std::string* lte,
+    std::string* gt,
+    std::string* gte) {
+    if (!reverse && gte != NULL) {
+      dbIterator_->Seek(*gte);
+    } else if (!reverse && gt != NULL) {
+      dbIterator_->Seek(*gt);
 
-    if (!dbIterator->Valid()) {
-      dbIterator->SeekToLast();
-    } else if (dbIterator->key().compare(*lte) > 0) {
-      dbIterator->Prev();
-    }
-  } else if (reverse && lt != NULL) {
-    dbIterator->Seek(*lt);
+      if (dbIterator_->Valid() && dbIterator_->key().compare(*gt) == 0) {
+        dbIterator_->Next();
+      }
+    } else if (reverse && lte != NULL) {
+      dbIterator_->Seek(*lte);
 
-    if (!dbIterator->Valid()) {
-      dbIterator->SeekToLast();
-    } else if (dbIterator->key().compare(*lt) >= 0) {
-      dbIterator->Prev();
+      if (!dbIterator_->Valid()) {
+        dbIterator_->SeekToLast();
+      } else if (dbIterator_->key().compare(*lte) > 0) {
+        dbIterator_->Prev();
+      }
+    } else if (reverse && lt != NULL) {
+      dbIterator_->Seek(*lt);
+
+      if (!dbIterator_->Valid()) {
+        dbIterator_->SeekToLast();
+      } else if (dbIterator_->key().compare(*lt) >= 0) {
+        dbIterator_->Prev();
+      }
+    } else if (reverse) {
+      dbIterator_->SeekToLast();
+    } else {
+      dbIterator_->SeekToFirst();
     }
-  } else if (reverse) {
-    dbIterator->SeekToLast();
-  } else {
-    dbIterator->SeekToFirst();
   }
-}
+
+  leveldb::Iterator* dbIterator_;
+};
 
 /**
  * Owns a leveldb iterator.
  */
-struct Iterator {
+struct Iterator final : public BaseIterator {
   Iterator (Database* database,
             uint32_t id,
             bool reverse,
@@ -544,7 +552,8 @@ struct Iterator {
             bool keyAsBuffer,
             bool valueAsBuffer,
             uint32_t highWaterMark)
-    : database_(database),
+    : BaseIterator(),
+      database_(database),
       id_(id),
       reverse_(reverse),
       keys_(keys),
@@ -557,7 +566,6 @@ struct Iterator {
       keyAsBuffer_(keyAsBuffer),
       valueAsBuffer_(valueAsBuffer),
       highWaterMark_(highWaterMark),
-      dbIterator_(NULL),
       count_(0),
       seeking_(false),
       landed_(false),
@@ -614,7 +622,7 @@ struct Iterator {
     if (dbIterator_ != NULL) return false;
 
     dbIterator_ = database_->NewIterator(options_);
-    initial_seek(dbIterator_, reverse_, lt_, lte_, gt_, gte_);
+    InitialSeek(reverse_, lt_, lte_, gt_, gte_);
 
     return true;
   }
@@ -696,7 +704,6 @@ struct Iterator {
   bool keyAsBuffer_;
   bool valueAsBuffer_;
   uint32_t highWaterMark_;
-  leveldb::Iterator* dbIterator_;
   int count_;
   bool seeking_;
   bool landed_;
@@ -1072,6 +1079,7 @@ struct ClearWorker final : public PriorityWorker {
       gte_(gte),
       ended_(false),
       dbIterator_(NULL) {
+    baseIterator_ = new BaseIterator();
     readOptions_ = new leveldb::ReadOptions();
     readOptions_->fill_cache = false;
     readOptions_->snapshot = database->NewSnapshot();
@@ -1088,13 +1096,16 @@ struct ClearWorker final : public PriorityWorker {
     if (lte_ != NULL) delete lte_;
     if (gte_ != NULL) delete gte_;
 
+    delete baseIterator_;
     delete readOptions_;
     delete writeOptions_;
   }
 
   void DoExecute () override {
     dbIterator_ = database_->NewIterator(readOptions_);
-    initial_seek(dbIterator_, reverse_, lt_, lte_, gt_, gte_);
+
+    baseIterator_->dbIterator_ = dbIterator_;
+    baseIterator_->InitialSeek(reverse_, lt_, lte_, gt_, gte_);
 
     while (dbIterator_->Valid()) {
       leveldb::Slice keySlice = dbIterator_->key();
@@ -1142,6 +1153,7 @@ struct ClearWorker final : public PriorityWorker {
   std::string* gt_;
   std::string* gte_;
   bool ended_;
+  BaseIterator* baseIterator_;
   leveldb::Iterator* dbIterator_;
   leveldb::ReadOptions* readOptions_;
   leveldb::WriteOptions* writeOptions_;
