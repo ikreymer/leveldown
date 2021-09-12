@@ -488,11 +488,13 @@ struct PriorityWorker : public BaseWorker {
  * Owns a leveldb iterator.
  */
 struct BaseIterator {
-  BaseIterator(std::string* lt,
+  BaseIterator(bool reverse,
+               std::string* lt,
                std::string* lte,
                std::string* gt,
                std::string* gte)
     : dbIterator_(NULL),
+      reverse_(reverse),
       lt_(lt),
       lte_(lte),
       gt_(gt),
@@ -508,16 +510,16 @@ struct BaseIterator {
   /**
    * Seek to the first key based on range options.
    */
-  void InitialSeek(bool reverse) {
-    if (!reverse && gte_ != NULL) {
+  void InitialSeek() {
+    if (!reverse_ && gte_ != NULL) {
       dbIterator_->Seek(*gte_);
-    } else if (!reverse && gt_ != NULL) {
+    } else if (!reverse_ && gt_ != NULL) {
       dbIterator_->Seek(*gt_);
 
       if (dbIterator_->Valid() && dbIterator_->key().compare(*gt_) == 0) {
         dbIterator_->Next();
       }
-    } else if (reverse && lte_ != NULL) {
+    } else if (reverse_ && lte_ != NULL) {
       dbIterator_->Seek(*lte_);
 
       if (!dbIterator_->Valid()) {
@@ -525,7 +527,7 @@ struct BaseIterator {
       } else if (dbIterator_->key().compare(*lte_) > 0) {
         dbIterator_->Prev();
       }
-    } else if (reverse && lt_ != NULL) {
+    } else if (reverse_ && lt_ != NULL) {
       dbIterator_->Seek(*lt_);
 
       if (!dbIterator_->Valid()) {
@@ -533,11 +535,16 @@ struct BaseIterator {
       } else if (dbIterator_->key().compare(*lt_) >= 0) {
         dbIterator_->Prev();
       }
-    } else if (reverse) {
+    } else if (reverse_) {
       dbIterator_->SeekToLast();
     } else {
       dbIterator_->SeekToFirst();
     }
+  }
+
+  void Advance () {
+    if (reverse_) dbIterator_->Prev();
+    else dbIterator_->Next();
   }
 
   bool OutOfRange (leveldb::Slice& target) {
@@ -548,6 +555,7 @@ struct BaseIterator {
   }
 
   leveldb::Iterator* dbIterator_;
+  bool reverse_;
   std::string* lt_;
   std::string* lte_;
   std::string* gt_;
@@ -572,10 +580,9 @@ struct Iterator final : public BaseIterator {
             bool keyAsBuffer,
             bool valueAsBuffer,
             uint32_t highWaterMark)
-    : BaseIterator(lt, lte, gt, gte),
+    : BaseIterator(reverse, lt, lte, gt, gte),
       database_(database),
       id_(id),
-      reverse_(reverse),
       keys_(keys),
       values_(values),
       limit_(limit),
@@ -632,19 +639,14 @@ struct Iterator final : public BaseIterator {
     if (dbIterator_ != NULL) return false;
 
     dbIterator_ = database_->NewIterator(options_);
-    InitialSeek(reverse_);
+    InitialSeek();
 
     return true;
   }
 
   bool Read (std::string& key, std::string& value) {
     if (!GetIterator() && !seeking_) {
-      if (reverse_) {
-        dbIterator_->Prev();
-      }
-      else {
-        dbIterator_->Next();
-      }
+      Advance();
     }
 
     seeking_ = false;
@@ -696,7 +698,6 @@ struct Iterator final : public BaseIterator {
 
   Database* database_;
   uint32_t id_;
-  bool reverse_;
   bool keys_;
   bool values_;
   int limit_;
@@ -1069,12 +1070,11 @@ struct ClearWorker final : public PriorityWorker {
                std::string* gt,
                std::string* gte)
     : PriorityWorker(env, database, callback, "leveldown.db.clear"),
-      reverse_(reverse),
       limit_(limit),
       count_(0),
       ended_(false),
       dbIterator_(NULL) {
-    baseIterator_ = new BaseIterator(lt, lte, gt, gte);
+    baseIterator_ = new BaseIterator(reverse, lt, lte, gt, gte);
     readOptions_ = new leveldb::ReadOptions();
     readOptions_->fill_cache = false;
     readOptions_->snapshot = database->NewSnapshot();
@@ -1095,7 +1095,7 @@ struct ClearWorker final : public PriorityWorker {
     dbIterator_ = database_->NewIterator(readOptions_);
 
     baseIterator_->dbIterator_ = dbIterator_;
-    baseIterator_->InitialSeek(reverse_);
+    baseIterator_->InitialSeek();
 
     while (dbIterator_->Valid()) {
       leveldb::Slice keySlice = dbIterator_->key();
@@ -1112,8 +1112,7 @@ struct ClearWorker final : public PriorityWorker {
         return;
       }
 
-      if (reverse_) dbIterator_->Prev();
-      else dbIterator_->Next();
+      baseIterator_->Advance();
     }
 
     SetStatus(dbIterator_->status());
@@ -1127,7 +1126,6 @@ struct ClearWorker final : public PriorityWorker {
     PriorityWorker::DoFinally();
   }
 
-  bool reverse_;
   int limit_;
   int count_;
   bool ended_;
