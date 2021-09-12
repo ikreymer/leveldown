@@ -485,6 +485,48 @@ struct PriorityWorker : public BaseWorker {
 };
 
 /**
+ * Common logic for seeking to the first key based on range options.
+ * TODO: move to struct (something like "BaseIterator")
+ */
+static void initial_seek(
+  leveldb::Iterator* dbIterator,
+  bool reverse,
+  std::string* lt,
+  std::string* lte,
+  std::string* gt,
+  std::string* gte) {
+  if (!reverse && gte != NULL) {
+    dbIterator->Seek(*gte);
+  } else if (!reverse && gt != NULL) {
+    dbIterator->Seek(*gt);
+
+    if (dbIterator->Valid() && dbIterator->key().compare(*gt) == 0) {
+      dbIterator->Next();
+    }
+  } else if (reverse && lte != NULL) {
+    dbIterator->Seek(*lte);
+
+    if (!dbIterator->Valid()) {
+      dbIterator->SeekToLast();
+    } else if (dbIterator->key().compare(*lte) > 0) {
+      dbIterator->Prev();
+    }
+  } else if (reverse && lt != NULL) {
+    dbIterator->Seek(*lt);
+
+    if (!dbIterator->Valid()) {
+      dbIterator->SeekToLast();
+    } else if (dbIterator->key().compare(*lt) >= 0) {
+      dbIterator->Prev();
+    }
+  } else if (reverse) {
+    dbIterator->SeekToLast();
+  } else {
+    dbIterator->SeekToFirst();
+  }
+}
+
+/**
  * Owns a leveldb iterator.
  */
 struct Iterator {
@@ -572,36 +614,7 @@ struct Iterator {
     if (dbIterator_ != NULL) return false;
 
     dbIterator_ = database_->NewIterator(options_);
-
-    if (!reverse_ && gte_ != NULL) {
-      dbIterator_->Seek(*gte_);
-    } else if (!reverse_ && gt_ != NULL) {
-      dbIterator_->Seek(*gt_);
-
-      if (dbIterator_->Valid() && dbIterator_->key().compare(*gt_) == 0) {
-        dbIterator_->Next();
-      }
-    } else if (reverse_ && lte_ != NULL) {
-      dbIterator_->Seek(*lte_);
-
-      if (!dbIterator_->Valid()) {
-        dbIterator_->SeekToLast();
-      } else if (dbIterator_->key().compare(*lte_) > 0) {
-        dbIterator_->Prev();
-      }
-    } else if (reverse_ && lt_ != NULL) {
-      dbIterator_->Seek(*lt_);
-
-      if (!dbIterator_->Valid()) {
-        dbIterator_->SeekToLast();
-      } else if (dbIterator_->key().compare(*lt_) >= 0) {
-        dbIterator_->Prev();
-      }
-    } else if (reverse_) {
-      dbIterator_->SeekToLast();
-    } else {
-      dbIterator_->SeekToFirst();
-    }
+    initial_seek(dbIterator_, reverse_, lt_, lte_, gt_, gte_);
 
     return true;
   }
@@ -619,18 +632,11 @@ struct Iterator {
     seeking_ = false;
 
     if (dbIterator_->Valid()) {
-      std::string keyStr = dbIterator_->key().ToString();
+      leveldb::Slice keySlice = dbIterator_->key();
 
-      if ((limit_ < 0 || ++count_ <= limit_)
-          && ( lt_  != NULL ? (lt_->compare(keyStr) > 0)
-               : lte_ != NULL ? (lte_->compare(keyStr) >= 0)
-               : true )
-          && ( gt_  != NULL ? (gt_->compare(keyStr) < 0)
-               : gte_ != NULL ? (gte_->compare(keyStr) <= 0)
-               : true )
-          ) {
+      if ((limit_ < 0 || ++count_ <= limit_) && !OutOfRange(keySlice)) {
         if (keys_) {
-          key.assign(dbIterator_->key().data(), dbIterator_->key().size());
+          key.assign(keySlice.data(), keySlice.size());
         }
         if (values_) {
           value.assign(dbIterator_->value().data(), dbIterator_->value().size());
@@ -1038,6 +1044,128 @@ NAPI_METHOD(db_del) {
   napi_value callback = argv[3];
 
   DelWorker* worker = new DelWorker(env, database, callback, key, sync);
+  worker->Queue();
+
+  NAPI_RETURN_UNDEFINED();
+}
+
+/**
+ * Worker class for deleting a range from a database.
+ */
+struct ClearWorker final : public PriorityWorker {
+  ClearWorker (napi_env env,
+               Database* database,
+               napi_value callback,
+               bool reverse,
+               int limit,
+               std::string* lt,
+               std::string* lte,
+               std::string* gt,
+               std::string* gte)
+    : PriorityWorker(env, database, callback, "leveldown.db.clear"),
+      reverse_(reverse),
+      limit_(limit),
+      count_(0),
+      lt_(lt),
+      lte_(lte),
+      gt_(gt),
+      gte_(gte),
+      ended_(false),
+      dbIterator_(NULL) {
+    readOptions_ = new leveldb::ReadOptions();
+    readOptions_->fill_cache = false;
+    readOptions_->snapshot = database->NewSnapshot();
+    writeOptions_ = new leveldb::WriteOptions();
+    writeOptions_->sync = false;
+  }
+
+  ~ClearWorker () {
+    // TODO: write GC tests
+    assert(ended_);
+
+    if (lt_ != NULL) delete lt_;
+    if (gt_ != NULL) delete gt_;
+    if (lte_ != NULL) delete lte_;
+    if (gte_ != NULL) delete gte_;
+
+    delete readOptions_;
+    delete writeOptions_;
+  }
+
+  void DoExecute () override {
+    dbIterator_ = database_->NewIterator(readOptions_);
+    initial_seek(dbIterator_, reverse_, lt_, lte_, gt_, gte_);
+
+    while (dbIterator_->Valid()) {
+      leveldb::Slice keySlice = dbIterator_->key();
+
+      if ((limit_ >= 0 && ++count_ > limit_) || OutOfRange(keySlice)) {
+        break;
+      }
+
+      // TODO: use batches
+      leveldb::Status delStatus = database_->Del(*writeOptions_, keySlice);
+
+      if (!delStatus.ok()) {
+        SetStatus(delStatus);
+        return;
+      }
+
+      if (reverse_) dbIterator_->Prev();
+      else dbIterator_->Next();
+    }
+
+    SetStatus(dbIterator_->status());
+  }
+
+  void DoFinally () override {
+    delete dbIterator_;
+    dbIterator_ = NULL;
+    database_->ReleaseSnapshot(readOptions_->snapshot);
+    ended_ = true;
+    PriorityWorker::DoFinally();
+  }
+
+  // TODO: move to shared method
+  bool OutOfRange (leveldb::Slice& target) {
+    return ((lt_  != NULL && target.compare(*lt_) >= 0) ||
+            (lte_ != NULL && target.compare(*lte_) > 0) ||
+            (gt_  != NULL && target.compare(*gt_) <= 0) ||
+            (gte_ != NULL && target.compare(*gte_) < 0));
+  }
+
+  bool reverse_;
+  int limit_;
+  int count_;
+  std::string* lt_;
+  std::string* lte_;
+  std::string* gt_;
+  std::string* gte_;
+  bool ended_;
+  leveldb::Iterator* dbIterator_;
+  leveldb::ReadOptions* readOptions_;
+  leveldb::WriteOptions* writeOptions_;
+};
+
+/**
+ * Delete a range from a database.
+ */
+NAPI_METHOD(db_clear) {
+  NAPI_ARGV(3);
+  NAPI_DB_CONTEXT();
+
+  napi_value options = argv[1];
+  napi_value callback = argv[2];
+
+  bool reverse = BooleanProperty(env, options, "reverse", false);
+  int limit = Int32Property(env, options, "limit", -1);
+
+  std::string* lt = RangeOption(env, options, "lt");
+  std::string* lte = RangeOption(env, options, "lte");
+  std::string* gt = RangeOption(env, options, "gt");
+  std::string* gte = RangeOption(env, options, "gte");
+
+  ClearWorker* worker = new ClearWorker(env, database, callback, reverse, limit, lt, lte, gt, gte);
   worker->Queue();
 
   NAPI_RETURN_UNDEFINED();
@@ -1734,6 +1862,7 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(db_put);
   NAPI_EXPORT_FUNCTION(db_get);
   NAPI_EXPORT_FUNCTION(db_del);
+  NAPI_EXPORT_FUNCTION(db_clear);
   NAPI_EXPORT_FUNCTION(db_approximate_size);
   NAPI_EXPORT_FUNCTION(db_compact_range);
   NAPI_EXPORT_FUNCTION(db_get_property);
