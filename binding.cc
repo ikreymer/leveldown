@@ -501,13 +501,17 @@ struct BaseIterator {
       lt_(lt),
       lte_(lte),
       gt_(gt),
-      gte_(gte) {
+      gte_(gte),
+      isEnding_(false),
+      hasEnded_(false) {
     options_ = new leveldb::ReadOptions();
     options_->fill_cache = fillCache;
     options_->snapshot = database->NewSnapshot();
   }
 
   ~BaseIterator () {
+    assert(hasEnded_);
+
     if (lt_ != NULL) delete lt_;
     if (gt_ != NULL) delete gt_;
     if (lte_ != NULL) delete lte_;
@@ -554,10 +558,14 @@ struct BaseIterator {
     }
   }
 
-  void IteratorEnd () {
-    delete dbIterator_;
-    dbIterator_ = NULL;
-    database_->ReleaseSnapshot(options_->snapshot);
+  void End () {
+    if (!hasEnded_) {
+      isEnding_ = true;
+      hasEnded_ = true;
+      delete dbIterator_;
+      dbIterator_ = NULL;
+      database_->ReleaseSnapshot(options_->snapshot);
+    }
   }
 
   void Advance () {
@@ -595,6 +603,10 @@ struct BaseIterator {
   std::string* lte_;
   std::string* gt_;
   std::string* gte_;
+  bool isEnding_;
+  bool hasEnded_;
+
+private:
   leveldb::ReadOptions* options_;
 };
 
@@ -628,14 +640,11 @@ struct Iterator final : public BaseIterator {
       seeking_(false),
       landed_(false),
       nexting_(false),
-      ended_(false),
       endWorker_(NULL),
       ref_(NULL) {
   }
 
-  ~Iterator () {
-    assert(ended_);
-  }
+  ~Iterator () {}
 
   void Attach (napi_ref ref) {
     ref_ = ref;
@@ -726,7 +735,6 @@ struct Iterator final : public BaseIterator {
   bool seeking_;
   bool landed_;
   bool nexting_;
-  bool ended_;
 
   BaseWorker* endWorker_;
 
@@ -753,12 +761,7 @@ static void env_cleanup_hook (void* arg) {
     std::map<uint32_t, Iterator*>::iterator it;
 
     for (it = iterators.begin(); it != iterators.end(); ++it) {
-      Iterator* iterator = it->second;
-
-      if (!iterator->ended_) {
-        iterator->ended_ = true;
-        iterator->IteratorEnd();
-      }
+      it->second->End();
     }
 
     // Having ended the iterators (and released snapshots) we can safely close.
@@ -1088,8 +1091,7 @@ struct ClearWorker final : public PriorityWorker {
                std::string* gte)
     : PriorityWorker(env, database, callback, "leveldown.db.clear"),
       limit_(limit),
-      count_(0),
-      ended_(false) {
+      count_(0) {
     baseIterator_ = new BaseIterator(database, reverse, lt, lte, gt, gte, false);
     writeOptions_ = new leveldb::WriteOptions();
     writeOptions_->sync = false;
@@ -1097,8 +1099,6 @@ struct ClearWorker final : public PriorityWorker {
 
   ~ClearWorker () {
     // TODO: write GC tests
-    assert(ended_);
-
     delete baseIterator_;
     delete writeOptions_;
   }
@@ -1128,14 +1128,12 @@ struct ClearWorker final : public PriorityWorker {
   }
 
   void DoFinally () override {
-    baseIterator_->IteratorEnd();
-    ended_ = true;
+    baseIterator_->End();
     PriorityWorker::DoFinally();
   }
 
   int limit_;
   int count_;
-  bool ended_;
   BaseIterator* baseIterator_;
   leveldb::WriteOptions* writeOptions_;
 };
@@ -1413,7 +1411,7 @@ NAPI_METHOD(iterator_seek) {
   NAPI_ARGV(2);
   NAPI_ITERATOR_CONTEXT();
 
-  if (iterator->ended_) {
+  if (iterator->isEnding_ || iterator->hasEnded_) {
     napi_throw_error(env, NULL, "iterator has ended");
   }
 
@@ -1476,7 +1474,7 @@ struct EndWorker final : public BaseWorker {
   ~EndWorker () {}
 
   void DoExecute () override {
-    iterator_->IteratorEnd();
+    iterator_->End();
   }
 
   void HandleOKCallback () override {
@@ -1492,9 +1490,9 @@ struct EndWorker final : public BaseWorker {
  * open iterators during NAPI_METHOD(db_close).
  */
 static void iterator_end_do (napi_env env, Iterator* iterator, napi_value cb) {
-  if (!iterator->ended_) {
+  if (!iterator->isEnding_) {
     EndWorker* worker = new EndWorker(env, iterator, cb);
-    iterator->ended_ = true;
+    iterator->isEnding_ = true;
 
     if (iterator->nexting_) {
       iterator->endWorker_ = worker;
@@ -1591,7 +1589,7 @@ NAPI_METHOD(iterator_next) {
 
   napi_value callback = argv[1];
 
-  if (iterator->ended_) {
+  if (iterator->isEnding_ || iterator->hasEnded_) {
     napi_value argv = CreateError(env, "iterator has ended");
     CallFunction(env, callback, 1, &argv);
 
